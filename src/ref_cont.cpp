@@ -234,7 +234,6 @@ int main(int argc, char** argv) {
         for (unsigned long i = 0; i < seq.size() - kSize + 1; i++) {
             uint64_t kmer = KD->hash_kmer(seq.substr(i, kSize));
             uint64_t color = kf->getCount(kmer);
-            cout << "query:" << kmer << ": " << color << endl;
             for (const auto& genomeID : color_to_vecGroups[color]) {
                 kmers_matches.emplace_back(genomeID);
             }
