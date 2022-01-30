@@ -168,7 +168,6 @@ int main(int argc, char** argv) {
     colored_kDataFrame* ckf = colored_kDataFrame::load(index_prefix);
     kDataFrame* kf = ckf->getkDataFrame();
 
-
     set<int> vec_singleColors;
     flat_hash_map<uint64_t, vector<uint32_t>> color_to_vecGroups;
     flat_hash_map<uint64_t, string> color_to_groupString;
@@ -188,7 +187,7 @@ int main(int argc, char** argv) {
 
     cerr << "Creating fasta file handlers..." << endl;
     for (auto& item : vec_singleColors) {
-        string file_name = "genome_" + to_string(item) + "_partition.fa";
+        string file_name = "genome_" + ckf->namesMap[item] + "_partition.fa";
         fasta_writer[to_string(item)] = new fileHandler(file_name);
     }
 
@@ -205,6 +204,9 @@ int main(int argc, char** argv) {
     kseqObj = kseq_init(fp);
 
     cout << "Processing started ..." << endl;
+
+    auto * KD = kmerDecoder::getInstance(KMERS, mumur_hasher, {{"kSize", kSize}});
+    
 
     int total = 0;
     int chunks = 0;
@@ -230,7 +232,9 @@ int main(int argc, char** argv) {
         vector<uint32_t> kmers_matches;
 
         for (unsigned long i = 0; i < seq.size() - kSize + 1; i++) {
-            uint64_t color = kf->getCount(seq.substr(i, kSize));
+            uint64_t kmer = KD->hash_kmer(seq.substr(i, kSize));
+            uint64_t color = kf->getCount(kmer);
+            cout << "query:" << kmer << ": " << color << endl;
             for (const auto& genomeID : color_to_vecGroups[color]) {
                 kmers_matches.emplace_back(genomeID);
             }
