@@ -1,16 +1,17 @@
-#include "string"
 #include "kDataFrame.hpp"
 #include <stdexcept>
 #include "tuple"
 #include <sys/stat.h>
 #include "colored_kDataFrame.hpp"
+#include <kseq/kseq.h>
 #include <zlib.h>
 #include <cstdio>
-#include <kseq/kseq.h>
 #include <iostream>
 #include <vector>
+#include <glob.h> // glob(), globfree()
 #include <cassert>
 #include "kmerDecoder.hpp"
+#include <string>     // std::string, std::to_string
 
 #define KSIZE 21
 #define CHUNK_SIZE 5000
@@ -28,7 +29,7 @@ string create_dir(string output_file, int serial) {
         new_name = output_file;
     }
     else {
-        new_name = output_file + "_v." + to_string(serial);
+        new_name = output_file + "_v." + std::to_string(serial);
         dir_err = mkdir(new_name.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
     }
 
@@ -82,24 +83,34 @@ inline string time_diff(std::chrono::high_resolution_clock::time_point& t1) {
     return timeDiff;
 }
 
-flat_hash_map<uint64_t, std::vector<uint32_t>> load_colors(string index_prefix) {
-    flat_hash_map<uint64_t, std::vector<uint32_t> > colors;
-    string inputFilename = index_prefix + "colors.intvectors";
-    ifstream input(inputFilename);
-    uint32_t size;
-    input >> size;
-    colors = flat_hash_map<uint64_t, std::vector<uint32_t> >(size);
-    for (int i = 0; i < size; i++) {
-        uint64_t color, colorSize;
-        input >> color >> colorSize;
-        uint32_t sampleID;
-        colors[color] = std::vector<uint32_t>(colorSize);
-        for (int j = 0; j < colorSize; j++) {
-            input >> sampleID;
-            colors[color][j] = sampleID;
-        }
+// thanks to https://stackoverflow.com/a/8615450/3371177
+std::vector<std::string> glob(const std::string& pattern) {
+    using namespace std;
+
+    // glob struct resides on the stack
+    glob_t glob_result;
+    memset(&glob_result, 0, sizeof(glob_result));
+
+    // do the glob operation
+    int return_value = glob(pattern.c_str(), GLOB_TILDE, NULL, &glob_result);
+    if (return_value != 0) {
+        globfree(&glob_result);
+        stringstream ss;
+        ss << "glob() failed with return_value " << return_value << endl;
+        throw std::runtime_error(ss.str());
     }
-    return colors;
+
+    // collect all the filenames into a std::list<std::string>
+    vector<string> filenames;
+    for (size_t i = 0; i < glob_result.gl_pathc; ++i) {
+        filenames.push_back(string(glob_result.gl_pathv[i]));
+    }
+
+    // cleanup
+    globfree(&glob_result);
+
+    // done
+    return filenames;
 }
 
 tuple<string, vector<int>> score(vector<uint32_t>& genomes) {
@@ -153,42 +164,90 @@ int main(int argc, char** argv) {
     }
 
     string reads_file = argv[1];
-    string index_prefix = argv[2];
+    string kfs_dir = argv[2];
 
-    if (!file_exists(reads_file)) {
-        throw std::runtime_error("Could not open the unitigs fasta file");
+    kDataFrame* frame;
+    std::string dir_prefix = kfs_dir.substr(kfs_dir.find_last_of("/\\") + 1);
+
+    flat_hash_map<string, string> namesMap;
+    string names_fileName = kfs_dir;
+
+    flat_hash_map<string, uint64_t> tagsMap;
+    flat_hash_map<string, uint64_t> groupNameMap;
+    flat_hash_map<uint64_t, std::vector<uint32_t>>* legend = new flat_hash_map<uint64_t, std::vector<uint32_t>>();
+    flat_hash_map<uint64_t, uint64_t> colorsCount;
+    uint64_t readID = 0, groupID = 1;
+    string seqName, groupName;
+    string line;
+
+    int total_kfs_number = 0;
+
+    // get kSize and type
+    for (const auto& dirEntry : glob(kfs_dir + "/*")) {
+        string file_name = (string)dirEntry;
+        size_t lastindex = file_name.find_last_of(".");
+        string kf_prefix = file_name.substr(0, lastindex);
+        std::string::size_type idx;
+        idx = file_name.rfind('.');
+        std::string extension = "";
+        if (idx != std::string::npos) extension = file_name.substr(idx + 1);
+        int detected_kSize;
+        hashingModes _hm;
+        if (extension == "mqf" || extension == "phmap") {
+            auto* _kf = kDataFrame::load(kf_prefix);
+            _hm = _kf->getkmerDecoder()->hash_mode;
+            detected_kSize = _kf->getkSize();
+            cout << "Detected kSize: " << detected_kSize << endl;
+        }
+        else {
+            continue;
+        }
+        // if(extension == "mqf") {frame = new kDataFrameMQF(detected_kSize, 30, mumur_hasher); break;} // temp. switch off
+        if (extension == "mqf") { frame = new kDataFramePHMAP(detected_kSize, _hm); break; }
+        else if (extension == "phmap") { frame = new kDataFramePHMAP(detected_kSize, _hm); break; }
+        else { continue; }
     }
 
-    if (!file_exists(index_prefix + ".extra")) {
-        throw std::runtime_error("Could not open kProcessor index file");
+    cout << "namesmap construction done..." << endl;
+
+    if (!file_exists(reads_file)) {
+        throw std::runtime_error("Could not open the reads fasta file");
+    }
+
+    flat_hash_map<string, kDataFrame*> all_kfs;
+    flat_hash_map<string, int> genome_to_id;
+    flat_hash_map<int, string> id_to_genome;
+
+
+
+    // Loading kfs
+    int counter = 0;
+    for (const auto& dirEntry : glob(kfs_dir + "/*")) {
+        string file_name = (string)dirEntry;
+        size_t lastindex = file_name.find_last_of(".");
+        string kf_prefix = file_name.substr(0, lastindex);
+
+        std::string kf_basename = kf_prefix.substr(kf_prefix.find_last_of("/\\") + 1);
+
+
+        std::string::size_type idx;
+        idx = file_name.rfind('.');
+        std::string extension = "";
+        if (idx != std::string::npos) extension = file_name.substr(idx + 1);
+        if (extension != "mqf" and extension != "phmap") continue;
+
+        all_kfs[kf_basename] = kDataFrame::load(kf_prefix);
+        genome_to_id[kf_basename] = counter++;
+        id_to_genome[genome_to_id[kf_basename]] = kf_basename;
     }
 
     // kProcessor Index Loading
-    std::cerr << "Loading kProcessor index ..." << std::endl;
-    colored_kDataFrame* ckf = colored_kDataFrame::load(index_prefix);
-    kDataFrame* kf = ckf->getkDataFrame();
-
-    set<int> vec_singleColors;
-    flat_hash_map<uint64_t, vector<uint32_t>> color_to_vecGroups;
-    flat_hash_map<uint64_t, string> color_to_groupString;
-    cerr << "Loading colors .." << endl;
-    auto colorsIntVector = load_colors(index_prefix);
-    for (auto const& color : colorsIntVector) {
-        uint64_t color_id = color.first;
-        auto all_group_ids = color.second;
-
-        for (auto _grp_id : all_group_ids) {
-            color_to_vecGroups[color_id].emplace_back(_grp_id);
-            vec_singleColors.emplace(_grp_id);
-        }
-    }
-
     map<string, fileHandler*> fasta_writer;
 
     cerr << "Creating fasta file handlers..." << endl;
-    for (auto& item : vec_singleColors) {
-        string file_name = "genome_" + ckf->namesMap[item] + "_partition.fa";
-        fasta_writer[to_string(item)] = new fileHandler(file_name);
+    for (auto& item : all_kfs) {
+        string file_name = "genome_" + item.first + "_partition.fa";
+        fasta_writer[item.first] = new fileHandler(file_name);
     }
 
     string unmapped_file_name = "unmapped_partition.fa";
@@ -205,8 +264,8 @@ int main(int argc, char** argv) {
 
     cout << "Processing started ..." << endl;
 
-    auto * KD = kmerDecoder::getInstance(KMERS, mumur_hasher, {{"kSize", kSize}});
-    
+    auto* KD = kmerDecoder::getInstance(KMERS, mumur_hasher, { {"kSize", kSize} });
+
 
     int total = 0;
     int chunks = 0;
@@ -231,11 +290,12 @@ int main(int argc, char** argv) {
 
         vector<uint32_t> kmers_matches;
 
-        for (unsigned long i = 0; i < seq.size() - kSize + 1; i++) {
-            uint64_t kmer = KD->hash_kmer(seq.substr(i, kSize));
-            uint64_t color = kf->getCount(kmer);
-            for (const auto& genomeID : color_to_vecGroups[color]) {
-                kmers_matches.emplace_back(genomeID);
+        for (auto const& ref : all_kfs) {
+            for (unsigned long i = 0; i < seq.size() - kSize + 1; i++) {
+                uint64_t kmer = KD->hash_kmer(seq.substr(i, kSize));
+                if (ref.second->getCount(kmer)) {
+                    kmers_matches.emplace_back(genome_to_id[ref.first]);
+                }
             }
         }
 
@@ -244,16 +304,16 @@ int main(int argc, char** argv) {
 
         if (get<0>(category) == "unique") {
             _unique++;
-            fasta_writer[to_string(get<1>(category)[0])]->write(record);
-        }        
-else if (get<0>(category) == "unmapped") {
+            fasta_writer[id_to_genome[get<1>(category)[0]]]->write(record);
+        }
+        else if (get<0>(category) == "unmapped") {
             _unmatched++;
             fasta_writer["unmapped"]->write(record);
         }
         else if (get<0>(category) == "ambig") {
             _ambig++;
             for (auto const& genomeID : get<1>(category)) {
-                fasta_writer[to_string(genomeID)]->write(record);
+                fasta_writer[id_to_genome[genomeID]]->write(record);
             }
         }
 

@@ -21,6 +21,10 @@ add_subdirectory(lib/kProcessor)
 
 include_directories("${PROJECT_SOURCE_DIR}/lib/kProcessor/include/kProcessor")
 include_directories("${PROJECT_SOURCE_DIR}/lib/kProcessor/ThirdParty/MQF/include")
+include_directories("${PROJECT_SOURCE_DIR}/lib/kProcessor/ThirdParty/kmerDecoder/include")
+include_directories("${PROJECT_SOURCE_DIR}/lib/kProcessor/ThirdParty/kmerDecoder/lib/kseq/include")
+include_directories("${PROJECT_SOURCE_DIR}/lib/kProcessor/ThirdParty/sdsl-lite/include")
+
 
 set(kProcessor_INCLUDE_PATH "${PROJECT_SOURCE_DIR}/lib/kProcessor/include" "${PROJECT_SOURCE_DIR}/lib/kProcessor/include/kProcessor")
 include_directories(${kProcessor_INCLUDE_PATH})
@@ -43,3 +47,5 @@ target_include_directories(refDecontam INTERFACE ${PHMAP_INCLUDE_DIRS} ${PROJECT
 add_executable(decontaminate src/ref_cont.cpp)
 target_link_libraries(decontaminate refDecontam kProcessor z)
 
+add_executable(decontam_by_sketches src/decontam_by_sketches.cpp)
+target_link_libraries(decontam_by_sketches refDecontam kProcessor z)
