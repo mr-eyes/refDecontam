@@ -19,6 +19,9 @@
 using namespace std;
 using namespace phmap;
 
+// TODO
+//  All ambig transcript will be written into a single file called ambiguous
+//  Ambig transcripts header will be modifed: [array of ambig genomes + their kmer count]
 
 string create_dir(string output_file, int serial) {
     int dir_err;
@@ -120,38 +123,65 @@ tuple<string, vector<int>> score(vector<uint32_t>& genomes) {
     if (genomes.empty())
         return make_tuple("unmapped", sources);
 
-    flat_hash_map<int, int> scores;
-    flat_hash_map<int, int> reverse_scores;
+    flat_hash_map<int, int> genome_to_count;
+    flat_hash_map<int, int> count_to_genome;
     flat_hash_map<int, int> countFreq;
-    vector<int> all_scores;
+    vector<int> all_counts;
 
+    // Just count frequencies
     for (const auto& genome : genomes) {
-        scores[genome]++;
+        genome_to_count[genome]++;
     }
 
-    for (const auto& score : scores) {
-        countFreq[score.second]++;
-        all_scores.emplace_back(score.second);
-        reverse_scores[score.second] = score.first;
+    // Count max freq
+    for (const auto& item : genome_to_count) {
+        countFreq[item.second]++;
+        all_counts.emplace_back(item.second);
+        count_to_genome[item.second] = item.first;
     }
 
-    auto max = std::max_element(all_scores.begin(), all_scores.end());
+    auto max_count = std::max_element(all_counts.begin(), all_counts.end());
 
-    if (countFreq[*max] == 1) {
-        sources.emplace_back(reverse_scores[*max]);
+    // All kmers are coming from a single genome
+    if (countFreq[*max_count] == 1) {
+        sources.emplace_back(count_to_genome[*max_count]);
         return make_tuple("unique", sources);
     }
 
-    for (const auto& score : scores) {
-        if (score.second == *max) {
+    // Kmers are coming from different genomes
+    for (const auto& score : genome_to_count)
+        if (score.second == *max_count)
             sources.emplace_back(score.first);
-        }
-    }
 
     return make_tuple("ambig", sources);
-
 }
 
+
+tuple<vector<int>, int> score_by_max(vector<uint32_t>& genomes) {
+
+    vector<int> sources;
+
+    if(genomes.empty()) return make_tuple(sources, 0);
+
+    // Count frequencies
+    flat_hash_map<uint32_t, uint32_t> genome_to_freq;
+    for (auto const& item : genomes) genome_to_freq[item]++;
+
+    // Only max genomes
+    vector<int> freqs;
+
+    for (auto& it : genome_to_freq) freqs.emplace_back(it.second);
+
+    // Max freq
+    auto max = std::max_element(freqs.begin(), freqs.end());
+
+    // Get all genomes with freq = max
+    for (auto& item : genome_to_freq)
+        if (item.second == *max)
+            sources.emplace_back(item.first);
+
+    return make_tuple(sources, *max);
+}
 
 
 int main(int argc, char** argv) {
@@ -159,12 +189,14 @@ int main(int argc, char** argv) {
     KS_FULL_COMMENT = true;
 
     if (argc != 3) {
-        cerr << "run ./decontaminate <ref_fasta> <index_prefix>" << endl;
+        cerr << "run ./decontam_by_sketches <ref_fasta> <sketches_dir>" << endl;
         exit(1);
     }
 
     string reads_file = argv[1];
     string kfs_dir = argv[2];
+
+    flat_hash_map<string, flat_hash_map<string, int>> stats;
 
     kDataFrame* frame;
     std::string dir_prefix = kfs_dir.substr(kfs_dir.find_last_of("/\\") + 1);
@@ -172,12 +204,6 @@ int main(int argc, char** argv) {
     flat_hash_map<string, string> namesMap;
     string names_fileName = kfs_dir;
 
-    flat_hash_map<string, uint64_t> tagsMap;
-    flat_hash_map<string, uint64_t> groupNameMap;
-    flat_hash_map<uint64_t, std::vector<uint32_t>>* legend = new flat_hash_map<uint64_t, std::vector<uint32_t>>();
-    flat_hash_map<uint64_t, uint64_t> colorsCount;
-    uint64_t readID = 0, groupID = 1;
-    string seqName, groupName;
     string line;
 
     int total_kfs_number = 0;
@@ -208,17 +234,15 @@ int main(int argc, char** argv) {
         else { continue; }
     }
 
-    cout << "namesmap construction done..." << endl;
 
     if (!file_exists(reads_file)) {
         throw std::runtime_error("Could not open the reads fasta file");
     }
 
+
     flat_hash_map<string, kDataFrame*> all_kfs;
     flat_hash_map<string, int> genome_to_id;
     flat_hash_map<int, string> id_to_genome;
-
-
 
     // Loading kfs
     int counter = 0;
@@ -226,22 +250,19 @@ int main(int argc, char** argv) {
         string file_name = (string)dirEntry;
         size_t lastindex = file_name.find_last_of(".");
         string kf_prefix = file_name.substr(0, lastindex);
-
         std::string kf_basename = kf_prefix.substr(kf_prefix.find_last_of("/\\") + 1);
-
-
         std::string::size_type idx;
         idx = file_name.rfind('.');
         std::string extension = "";
         if (idx != std::string::npos) extension = file_name.substr(idx + 1);
         if (extension != "mqf" and extension != "phmap") continue;
-
+        cout << "loading " << kf_prefix << "..." << endl;
         all_kfs[kf_basename] = kDataFrame::load(kf_prefix);
         genome_to_id[kf_basename] = counter++;
         id_to_genome[genome_to_id[kf_basename]] = kf_basename;
+        stats[kf_basename] = { {"unique", 0}, {"ambig", 0} };
     }
 
-    // kProcessor Index Loading
     map<string, fileHandler*> fasta_writer;
 
     cerr << "Creating fasta file handlers..." << endl;
@@ -252,6 +273,8 @@ int main(int argc, char** argv) {
 
     string unmapped_file_name = "unmapped_partition.fa";
     fasta_writer["unmapped"] = new fileHandler(unmapped_file_name);
+    string ambig_file_name = "ambiguous_partition.fa";
+    fasta_writer["ambig"] = new fileHandler(ambig_file_name);
 
     int chunkSize = CHUNK_SIZE;
     int kSize = KSIZE;
@@ -270,8 +293,6 @@ int main(int argc, char** argv) {
     int total = 0;
     int chunks = 0;
 
-    uint64_t _unique = 0;
-    uint64_t _ambig = 0;
     uint64_t _unmatched = 0;
 
     while (kseq_read(kseqObj) >= 0) {
@@ -281,12 +302,6 @@ int main(int argc, char** argv) {
         std::string id;
         id.append(kseqObj->name.s);
         if (kseqObj->comment.l) id.append(kseqObj->comment.s);
-
-        std::string record = ">";
-        record.append(id);
-        record.append("\n");
-        record.append(seq);
-        record.append("\n");
 
         vector<uint32_t> kmers_matches;
 
@@ -299,24 +314,43 @@ int main(int argc, char** argv) {
             }
         }
 
-        auto category = score(kmers_matches);
-
-
-        if (get<0>(category) == "unique") {
-            _unique++;
-            fasta_writer[id_to_genome[get<1>(category)[0]]]->write(record);
-        }
-        else if (get<0>(category) == "unmapped") {
-            _unmatched++;
+        tuple<vector<int>, int> scored_genomes = score_by_max(kmers_matches);
+        if(get<0>(scored_genomes).size() == 1){
+            std::string record = ">";
+            // TODO: Refactor later.
+            record.append(id);
+            record.append("\n");
+            record.append(seq);
+            record.append("\n");
+            stats[id_to_genome[get<0>(scored_genomes)[0]]]["unique"]++;
+            fasta_writer[id_to_genome[get<0>(scored_genomes)[0]]]->write(record);
+        }else if(get<0>(scored_genomes).size() == 0){
+            std::string record = ">";
+            record.append(id);
+            record.append("\n");
+            record.append(seq);
+            record.append("\n");
             fasta_writer["unmapped"]->write(record);
-        }
-        else if (get<0>(category) == "ambig") {
-            _ambig++;
-            for (auto const& genomeID : get<1>(category)) {
-                fasta_writer[id_to_genome[genomeID]]->write(record);
+            _unmatched++;
+        }else{
+            // Ambiguous
+            string header_tail = "|";
+            for(auto const & _genome_id : get<0>(scored_genomes)){
+                header_tail.append(id_to_genome[_genome_id]);
+                header_tail.append(";");
+                stats[id_to_genome[_genome_id]]["ambig"]++;
+            }
+            header_tail.append(to_string(get<1>(scored_genomes)));
+            for(auto const & _genome_id : get<0>(scored_genomes)){
+                std::string record = ">";
+                record.append(id);
+                record.append(header_tail);
+                record.append("\n");
+                record.append(seq);
+                record.append("\n");
+                fasta_writer["ambig"]->write(record);
             }
         }
-
 
         total++;
         if (total == 5000) {
@@ -326,8 +360,13 @@ int main(int argc, char** argv) {
 
     }
 
-    cout << "_unique: " << _unique << endl;
-    cout << "_ambig: " << _ambig << endl;
+    for(auto const & stat: stats){
+        string genome_name = stat.first;
+        auto _map = stat.second;
+        int unique = _map["unique"];
+        int ambig = _map["ambig"];
+        cout << genome_name << ": unique("<< unique <<") " << "ambig("<< ambig <<")" << endl;        
+    }
     cout << "_unmatched: " << _unmatched << endl;
 
     for (auto f : fasta_writer)
