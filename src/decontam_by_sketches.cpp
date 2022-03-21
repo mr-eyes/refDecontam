@@ -317,6 +317,23 @@ int main(int argc, char** argv) {
 
         tuple<vector<int>, int> scored_genomes = score_by_max(kmers_matches);
         if (get<0>(scored_genomes).size() == 1) {
+
+            // What is the next possible one?
+            vector<uint32_t> kmers_matches_2;
+            int best_match = get<0>(scored_genomes)[0];
+            for(const auto & _match : kmers_matches)
+                if(_match != best_match)
+                    kmers_matches_2.emplace_back(_match);
+
+            tuple<vector<int>, int> next_possible_scored_genomes = score_by_max(kmers_matches_2);
+            string next_possible_genomes = "|next_possible:";
+            for(const auto & _next_poss_ref: get<0>(next_possible_scored_genomes))
+                next_possible_genomes.append(id_to_genome[_next_poss_ref] + ";");
+            double next_possible_percentage = get<1>(next_possible_scored_genomes) / (double)hashes_set.size();
+            next_possible_genomes.append("kmers:" + to_string(get<1>(next_possible_scored_genomes)) + ";");
+            next_possible_genomes.append("percentage:" + to_string(next_possible_percentage));
+            // END next possible
+
             double percentage = get<1>(scored_genomes) / (double)hashes_set.size();
             string header_tail = "|";
             header_tail.append("kmers:" + to_string(get<1>(scored_genomes)) + ";");
@@ -325,6 +342,8 @@ int main(int argc, char** argv) {
             // TODO: Refactor later.
             record.append(id);
             record.append(header_tail);
+            if(get<0>(next_possible_scored_genomes).size())
+                record.append(next_possible_genomes);
             record.append("\n");
             record.append(seq);
             record.append("\n");
