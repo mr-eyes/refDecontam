@@ -19,9 +19,6 @@
 using namespace std;
 using namespace phmap;
 
-// TODO
-//  All ambig transcript will be written into a single file called ambiguous
-//  Ambig transcripts header will be modifed: [array of ambig genomes + their kmer count]
 
 string create_dir(string output_file, int serial) {
     int dir_err;
@@ -161,7 +158,7 @@ tuple<vector<int>, int> score_by_max(vector<uint32_t>& genomes) {
 
     vector<int> sources;
 
-    if(genomes.empty()) return make_tuple(sources, 0);
+    if (genomes.empty()) return make_tuple(sources, 0);
 
     // Count frequencies
     flat_hash_map<uint32_t, uint32_t> genome_to_freq;
@@ -305,26 +302,36 @@ int main(int argc, char** argv) {
 
         vector<uint32_t> kmers_matches;
 
-        for (auto const& ref : all_kfs) {
-            for (unsigned long i = 0; i < seq.size() - kSize + 1; i++) {
-                uint64_t kmer = KD->hash_kmer(seq.substr(i, kSize));
-                if (ref.second->getCount(kmer)) {
+        phmap::flat_hash_set<uint64_t> hashes_set;
+        
+
+        // unique hashes once
+        for (unsigned long i = 0; i < seq.size() - kSize + 1; i++)
+            hashes_set.insert(KD->hash_kmer(seq.substr(i, kSize)));
+        
+        // Iterate and search over all kfs
+        for (auto const& ref : all_kfs)
+            for (const auto& kmer_hash : hashes_set)
+                if (ref.second->getCount(kmer_hash))
                     kmers_matches.emplace_back(genome_to_id[ref.first]);
-                }
-            }
-        }
 
         tuple<vector<int>, int> scored_genomes = score_by_max(kmers_matches);
-        if(get<0>(scored_genomes).size() == 1){
+        if (get<0>(scored_genomes).size() == 1) {
+            double percentage = get<1>(scored_genomes) / (double)hashes_set.size();
+            string header_tail = "|";
+            header_tail.append("kmers:" + to_string(get<1>(scored_genomes)) + ";");
+            header_tail.append("percentage:" + to_string(percentage));
             std::string record = ">";
             // TODO: Refactor later.
             record.append(id);
+            record.append(header_tail);
             record.append("\n");
             record.append(seq);
             record.append("\n");
             stats[id_to_genome[get<0>(scored_genomes)[0]]]["unique"]++;
             fasta_writer[id_to_genome[get<0>(scored_genomes)[0]]]->write(record);
-        }else if(get<0>(scored_genomes).size() == 0){
+        }
+        else if (get<0>(scored_genomes).size() == 0) {
             std::string record = ">";
             record.append(id);
             record.append("\n");
@@ -332,24 +339,23 @@ int main(int argc, char** argv) {
             record.append("\n");
             fasta_writer["unmapped"]->write(record);
             _unmatched++;
-        }else{
+        }
+        else {
             // Ambiguous
             string header_tail = "|";
-            for(auto const & _genome_id : get<0>(scored_genomes)){
+            for (auto const& _genome_id : get<0>(scored_genomes)) {
                 header_tail.append(id_to_genome[_genome_id]);
                 header_tail.append(";");
                 stats[id_to_genome[_genome_id]]["ambig"]++;
             }
             header_tail.append(to_string(get<1>(scored_genomes)));
-            for(auto const & _genome_id : get<0>(scored_genomes)){
-                std::string record = ">";
-                record.append(id);
-                record.append(header_tail);
-                record.append("\n");
-                record.append(seq);
-                record.append("\n");
-                fasta_writer["ambig"]->write(record);
-            }
+            std::string record = ">";
+            record.append(id);
+            record.append(header_tail);
+            record.append("\n");
+            record.append(seq);
+            record.append("\n");
+            fasta_writer["ambig"]->write(record);
         }
 
         total++;
@@ -360,12 +366,12 @@ int main(int argc, char** argv) {
 
     }
 
-    for(auto const & stat: stats){
+    for (auto const& stat : stats) {
         string genome_name = stat.first;
         auto _map = stat.second;
         int unique = _map["unique"];
         int ambig = _map["ambig"];
-        cout << genome_name << ": unique("<< unique <<") " << "ambig("<< ambig <<")" << endl;        
+        cout << genome_name << ": unique(" << unique << ") " << "ambig(" << ambig << ")" << endl;
     }
     cout << "_unmatched: " << _unmatched << endl;
 
